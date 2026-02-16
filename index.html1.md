@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>The Buffer</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,300;0,400;0,500;1,300;1,400&family=DM+Sans:wght@300;400;500&display=swap');
+  *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+  html{scroll-behavior:smooth}
+  body{background:#0B2418;overflow-x:hidden}
+  textarea::placeholder{color:rgba(253,251,247,0.2)!important}
+  textarea:focus,button:focus{outline:none}
+  @keyframes breathe{0%,100%{opacity:0.3;transform:scale(1)}50%{opacity:0.7;transform:scale(1.05)}}
+  @keyframes pulseRec{0%,100%{opacity:1}50%{opacity:0.4}}
+  .pulse-rec{animation:pulseRec 1.2s ease infinite}
+  .breathe{animation:breathe 4s ease-in-out infinite}
+  ::-webkit-scrollbar{width:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  ::-webkit-scrollbar-thumb{background:rgba(134,178,137,0.15);border-radius:4px}
+  .delete-btn{opacity:0;transition:opacity 0.3s}
+  .vault-card:hover .delete-btn{opacity:1}
+  @media(max-width:640px){.export-grid{flex-direction:column!important}}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback} = React;
+
+/* ══════ IndexedDB ══════ */
+const DB_NAME="TheBufferVault", AUDIO_STORE="audioBlobs";
+function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,1);r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains(AUDIO_STORE))r.result.createObjectStore(AUDIO_STORE,{keyPath:"id"})};r.onsuccess=()=>res(r.result);r.onerror=()=>rej(r.error)})}
+async function saveAudioBlob(id,blob){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(AUDIO_STORE,"readwrite");tx.objectStore(AUDIO_STORE).put({id,blob});tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})}
+async function getAudioBlob(id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(AUDIO_STORE,"readonly");const rq=tx.objectStore(AUDIO_STORE).get(id);rq.onsuccess=()=>res(rq.result?.blob||null);rq.onerror=()=>rej(rq.error)})}
+async function deleteAudioBlob(id){const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(AUDIO_STORE,"readwrite");tx.objectStore(AUDIO_STORE).delete(id);tx.oncomplete=()=>res();tx.onerror=()=>rej(tx.error)})}
+
+/* ══════ localStorage ══════ */
+const EK="theBuffer_entries";
+const loadEntries=()=>{try{return JSON.parse(localStorage.getItem(EK)||"[]")}catch{return[]}};
+const persistEntries=(e)=>localStorage.setItem(EK,JSON.stringify(e));
+
+/* ══════ SVG Icons ══════ */
+const Icon=({d,size=16,stroke="currentColor",fill="none",sw=1.8})=>(
+  <svg width={size} height={size} viewBox="0 0 24 24" fill={fill} stroke={stroke} strokeWidth={sw} strokeLinecap="round" strokeLinejoin="round">
+    {Array.isArray(d)?d.map((p,i)=><path key={i} d={p}/>):<path d={d}/>}
+  </svg>
+);
+const I={
+  leaf:(p)=><Icon {...p} d={["M11 20A7 7 0 0 1 9.8 6.9C15.5 4.9 17 3.5 19 1c1 2 2 4.5 2 8 0 5.5-4.5 10-10 10Z","M2 21c0-3 1.85-5.36 5.08-6C9.5 14.52 12 13 13 12"]}/>,
+  type:(p)=><Icon {...p} d={["M4 7V4h16v3","M9 20h6","M12 4v16"]}/>,
+  volume:(p)=><Icon {...p} d={["M11 5 6 9H2v6h4l5 4zM15.54 8.46a5 5 0 0 1 0 7.07"]}/>,
+  mic:(p)=><Icon {...p} d={["M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z","M19 10v2a7 7 0 0 1-14 0v-2","M12 19v3"]}/>,
+  square:(p)=><Icon {...p} d="M3 3h18v18H3z"/>,
+  play:(p)=><Icon {...p} d="m5 3 14 9-14 9Z"/>,
+  pause:(p)=><Icon {...p} d={["M6 4h4v16H6z","M14 4h4v16h4z"]}/>,
+  trash:(p)=><Icon {...p} d={["M3 6h18","M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6","M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2","M10 11v6","M14 11v6"]}/>,
+  download:(p)=><Icon {...p} d={["M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4","M7 10l5 5 5-5","M12 15V3"]}/>,
+  fileText:(p)=><Icon {...p} d={["M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z","M14 2v6h6","M16 13H8","M16 17H8","M10 9H8"]}/>,
+  archive:(p)=><Icon {...p} d={["M21 8v13H3V8","M1 3h22v5H1z","M10 12h4"]}/>,
+  check:(p)=><Icon {...p} d="M20 6 9 17l-5-5"/>,
+  chevDown:(p)=><Icon {...p} d="m6 9 6 6 6-6"/>,
+  wind:(p)=><Icon {...p} d={["M17.7 7.7a2.5 2.5 0 1 1 1.8 4.3H2","M9.6 4.6A2 2 0 1 1 11 8H2","M12.6 19.4A2 2 0 1 0 14 16H2"]}/>,
+};
+
+/* ══════ Waveform ══════ */
+function Waveform({analyserRef,isRecording}){
+  const canvasRef=useRef(null),raf=useRef(null);
+  useEffect(()=>{
+    const canvas=canvasRef.current;if(!canvas)return;
+    const ctx=canvas.getContext("2d"),dpr=window.devicePixelRatio||1;
+    canvas.width=canvas.offsetWidth*dpr;canvas.height=canvas.offsetHeight*dpr;
+    ctx.scale(dpr,dpr);
+    const w=canvas.offsetWidth,h=canvas.offsetHeight;
+    if(isRecording&&analyserRef.current){
+      const an=analyserRef.current,buf=new Uint8Array(an.frequencyBinCount);
+      const draw=()=>{raf.current=requestAnimationFrame(draw);an.getByteTimeDomainData(buf);ctx.clearRect(0,0,w,h);ctx.shadowBlur=14;ctx.shadowColor="rgba(134,178,137,0.45)";ctx.lineWidth=2.2;ctx.strokeStyle="rgba(134,178,137,0.75)";ctx.beginPath();const sl=w/buf.length;for(let i=0;i<buf.length;i++){const v=buf[i]/128.0,y=(v*h)/2;i===0?ctx.moveTo(0,y):ctx.lineTo(i*sl,y)}ctx.lineTo(w,h/2);ctx.stroke();ctx.shadowBlur=0};
+      draw();
+    }else{
+      let t=0;
+      const drawIdle=()=>{raf.current=requestAnimationFrame(drawIdle);t+=0.012;ctx.clearRect(0,0,w,h);ctx.strokeStyle="rgba(134,178,137,0.2)";ctx.lineWidth=1.5;ctx.beginPath();for(let x=0;x<w;x++){const y=h/2+Math.sin(x*0.018+t)*6*Math.sin(t*0.4);x===0?ctx.moveTo(x,y):ctx.lineTo(x,y)}ctx.stroke()};
+      drawIdle();
+    }
+    return()=>cancelAnimationFrame(raf.current);
+  },[isRecording,analyserRef]);
+  return <canvas ref={canvasRef} style={{width:"100%",height:72,background:"rgba(11,36,24,0.5)",borderRadius:12}}/>;
+}
+
+/* ══════ Audio Player ══════ */
+function AudioPlayer({entryId}){
+  const [playing,setPlaying]=useState(false),[progress,setProgress]=useState(0),[dur,setDur]=useState(0);
+  const audioRef=useRef(null),urlRef=useRef(null);
+  useEffect(()=>{let c=false;(async()=>{const blob=await getAudioBlob(entryId);if(!blob||c)return;urlRef.current=URL.createObjectURL(blob);const a=new Audio(urlRef.current);a.addEventListener("loadedmetadata",()=>setDur(a.duration));a.addEventListener("timeupdate",()=>setProgress(a.duration?a.currentTime/a.duration:0));a.addEventListener("ended",()=>{setPlaying(false);setProgress(0)});audioRef.current=a})();return()=>{c=true;if(urlRef.current)URL.revokeObjectURL(urlRef.current);if(audioRef.current)audioRef.current.pause()}},[entryId]);
+  const toggle=()=>{if(!audioRef.current)return;playing?audioRef.current.pause():audioRef.current.play();setPlaying(!playing)};
+  const fmt=(s)=>{if(!s||!isFinite(s))return"0:00";return`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,"0")}`};
+  return(
+    <div style={{display:"flex",alignItems:"center",gap:12}}>
+      <button onClick={toggle} style={{width:36,height:36,borderRadius:"50%",background:"rgba(134,178,137,0.15)",border:"none",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center"}}>
+        {playing?<I.pause size={13} stroke="#86B289"/>:<I.play size={13} stroke="#86B289"/>}
+      </button>
+      <div style={{flex:1,height:6,borderRadius:4,background:"rgba(134,178,137,0.12)",overflow:"hidden"}}>
+        <div style={{width:`${progress*100}%`,height:"100%",borderRadius:4,background:"linear-gradient(90deg,rgba(134,178,137,0.4),rgba(134,178,137,0.75))",transition:"width 0.2s"}}/>
+      </div>
+      <span style={{fontSize:11,fontFamily:"'DM Sans',sans-serif",color:"rgba(134,178,137,0.5)"}}>{fmt(dur)}</span>
+    </div>
+  );
+}
+
+/* ══════════════════════════════════════
+   MAIN APP
+══════════════════════════════════════ */
+function App(){
+  const [mode,setMode]=useState("text");
+  const [text,setText]=useState("");
+  const [entries,setEntries]=useState([]);
+  const [recording,setRecording]=useState(false);
+  const [recTime,setRecTime]=useState(0);
+  const [saving,setSaving]=useState(false);
+  const [micErr,setMicErr]=useState(null);
+  const [showVault,setShowVault]=useState(false);
+  const [deleting,setDeleting]=useState(null);
+  const [hasChunks,setHasChunks]=useState(false);
+  const [exporting,setExporting]=useState(false);
+
+  const mrRef=useRef(null),chunksRef=useRef([]),analyserRef=useRef(null),streamRef=useRef(null),timerRef=useRef(null),taRef=useRef(null);
+
+  useEffect(()=>{setEntries(loadEntries())},[]);
+  useEffect(()=>{if(taRef.current){taRef.current.style.height="auto";taRef.current.style.height=taRef.current.scrollHeight+"px"}},[text]);
+
+  /* ── Recording ── */
+  const startRec=async()=>{
+    setMicErr(null);
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true});
+      streamRef.current=stream;
+      const ac=new(window.AudioContext||window.webkitAudioContext)();
+      const src=ac.createMediaStreamSource(stream);
+      const an=ac.createAnalyser();an.fftSize=2048;src.connect(an);analyserRef.current=an;
+      let mt="audio/webm";if(!MediaRecorder.isTypeSupported(mt))mt="audio/mp4";if(!MediaRecorder.isTypeSupported(mt))mt="";
+      const mr=new MediaRecorder(stream,mt?{mimeType:mt}:undefined);
+      chunksRef.current=[];setHasChunks(false);
+      mr.ondataavailable=(e)=>{if(e.data.size>0){chunksRef.current.push(e.data);setHasChunks(true)}};
+      mr.start(100);mrRef.current=mr;setRecording(true);setRecTime(0);
+      timerRef.current=setInterval(()=>setRecTime(p=>p+1),1000);
+    }catch(err){
+      setMicErr(err.name==="NotAllowedError"?"Microphone access denied. Please allow it in browser settings.":"Could not access microphone. Check your device.");
+    }
+  };
+  const stopRec=()=>new Promise(res=>{
+    if(mrRef.current&&mrRef.current.state!=="inactive"){mrRef.current.onstop=()=>{const blob=new Blob(chunksRef.current,{type:chunksRef.current[0]?.type||"audio/webm"});res(blob)};mrRef.current.stop()}else res(null);
+    if(streamRef.current)streamRef.current.getTracks().forEach(t=>t.stop());
+    clearInterval(timerRef.current);setRecording(false);
+  });
+
+  /* ── Save ── */
+  const save=async()=>{
+    if(mode==="text"&&!text.trim())return;
+    if(mode==="voice"&&!recording&&!hasChunks)return;
+    setSaving(true);
+    const id=Date.now().toString(36)+Math.random().toString(36).slice(2,6);
+    const ts=new Date().toISOString();
+    if(mode==="text"){
+      const entry={id,type:"text",content:text.trim(),timestamp:ts};
+      const up=[entry,...entries];setEntries(up);persistEntries(up);setText("");
+    }else{
+      let blob=recording?await stopRec():(chunksRef.current.length?new Blob(chunksRef.current,{type:chunksRef.current[0]?.type||"audio/webm"}):null);
+      if(blob){
+        await saveAudioBlob(id,blob);
+        const entry={id,type:"voice",duration:recTime,timestamp:ts};
+        const up=[entry,...entries];setEntries(up);persistEntries(up);
+        chunksRef.current=[];setHasChunks(false);setRecTime(0);
+      }
+    }
+    await new Promise(r=>setTimeout(r,800));setSaving(false);
+  };
+
+  /* ── Delete ── */
+  const del=async(id,type)=>{
+    setDeleting(id);await new Promise(r=>setTimeout(r,400));
+    if(type==="voice")await deleteAudioBlob(id);
+    const up=entries.filter(e=>e.id!==id);setEntries(up);persistEntries(up);setDeleting(null);
+  };
+
+  /* ══════ PDF EXPORT ══════ */
+  const exportPDF=()=>{
+    const {jsPDF}=window.jspdf;
+    const doc=new jsPDF({unit:"mm",format:"a4"});
+    const pw=210,ph=297,ml=22,mr2=22,mt2=28,mb=22;
+    const usable=pw-ml-mr2;
+    let y=mt2;
+
+    const textEntries=[...entries].filter(e=>e.type==="text").sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
+    if(textEntries.length===0){alert("No text entries to export.");return}
+
+    const checkPage=(need)=>{if(y+need>ph-mb){doc.addPage();y=mt2}};
+
+    /* ── Title page ── */
+    doc.setFillColor(11,36,24);
+    doc.rect(0,0,pw,ph,"F");
+
+    doc.setFont("helvetica","bold");doc.setFontSize(32);doc.setTextColor(253,251,247);
+    doc.text("The Buffer",pw/2,ph/2-35,{align:"center"});
+
+    doc.setFont("helvetica","normal");doc.setFontSize(13);doc.setTextColor(134,178,137);
+    doc.text("Session Export",pw/2,ph/2-20,{align:"center"});
+
+    doc.setDrawColor(134,178,137);doc.setLineWidth(0.3);
+    doc.line(pw/2-25,ph/2-12,pw/2+25,ph/2-12);
+
+    doc.setFontSize(11);doc.setTextColor(180,200,180);
+    const now=new Date();
+    doc.text(now.toLocaleDateString("en-US",{weekday:"long",year:"numeric",month:"long",day:"numeric"}),pw/2,ph/2+2,{align:"center"});
+    doc.text(`${textEntries.length} text entr${textEntries.length===1?"y":"ies"}`,pw/2,ph/2+12,{align:"center"});
+
+    doc.setFontSize(8);doc.setTextColor(100,130,100);
+    doc.text("Private & Confidential — For therapeutic use only",pw/2,ph-22,{align:"center"});
+
+    /* ── Content pages ── */
+    doc.addPage();y=mt2;
+
+    textEntries.forEach((entry,idx)=>{
+      const d=new Date(entry.timestamp);
+      const dateStr=d.toLocaleDateString("en-US",{weekday:"long",month:"long",day:"numeric",year:"numeric"});
+      const timeStr=d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit",second:"2-digit"});
+
+      checkPage(22);
+
+      // Entry number badge
+      doc.setFillColor(240,245,240);
+      doc.roundedRect(ml,y-4,usable,10,2,2,"F");
+      doc.setFont("helvetica","bold");doc.setFontSize(8);doc.setTextColor(80,110,80);
+      doc.text(`ENTRY ${idx+1}`,ml+4,y+2.5);
+      doc.setFont("helvetica","normal");doc.setFontSize(8);doc.setTextColor(120,145,120);
+      doc.text(`${dateStr}  \u2022  ${timeStr}`,ml+28,y+2.5);
+      y+=14;
+
+      // Body text
+      doc.setFont("helvetica","normal");doc.setFontSize(11);doc.setTextColor(40,50,40);
+      const lines=doc.splitTextToSize(entry.content,usable-4);
+      lines.forEach(line=>{
+        checkPage(6);
+        doc.text(line,ml+2,y);
+        y+=5.5;
+      });
+      y+=12;
+    });
+
+    // Page numbers
+    const total=doc.internal.getNumberOfPages();
+    for(let i=2;i<=total;i++){
+      doc.setPage(i);
+      doc.setFont("helvetica","normal");doc.setFontSize(7);doc.setTextColor(170,185,170);
+      doc.text(`The Buffer  \u2022  Page ${i-1} of ${total-1}`,pw/2,ph-10,{align:"center"});
+    }
+
+    doc.save(`TheBuffer_Session_${now.toISOString().slice(0,10)}.pdf`);
+  };
+
+  /* ══════ ZIP EXPORT (Voice Notes folder) ══════ */
+  const exportZIP=async()=>{
+    const voiceEntries=[...entries].filter(e=>e.type==="voice").sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
+    if(voiceEntries.length===0){alert("No voice notes to export.");return}
+    setExporting(true);
+    try{
+      const zip=new JSZip();
+      const folder=zip.folder("TheBuffer_VoiceNotes");
+
+      let readme="THE BUFFER — VOICE NOTES EXPORT\n";
+      readme+="================================\n\n";
+      readme+=`Exported: ${new Date().toLocaleDateString("en-US",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}\n`;
+      readme+=`Total Voice Notes: ${voiceEntries.length}\n\n`;
+      readme+="FILES:\n\n";
+
+      for(let i=0;i<voiceEntries.length;i++){
+        const e=voiceEntries[i];
+        const blob=await getAudioBlob(e.id);
+        if(!blob)continue;
+
+        const d=new Date(e.timestamp);
+        const dateStr=d.toLocaleDateString("en-US",{year:"numeric",month:"2-digit",day:"2-digit"}).replace(/\//g,"-");
+        const timeStr=d.toLocaleTimeString("en-US",{hour:"2-digit",minute:"2-digit",hour12:false}).replace(/:/g,"");
+        const dur=e.duration||0;
+        const durStr=`${Math.floor(dur/60)}m${String(dur%60).padStart(2,"0")}s`;
+
+        let ext="webm";
+        if(blob.type.includes("mp4"))ext="m4a";
+        else if(blob.type.includes("ogg"))ext="ogg";
+
+        const filename=`${String(i+1).padStart(2,"0")}_voice_${dateStr}_${timeStr}_${durStr}.${ext}`;
+        folder.file(filename,blob);
+
+        const fullDate=d.toLocaleDateString("en-US",{weekday:"short",month:"short",day:"numeric",year:"numeric"});
+        const fullTime=d.toLocaleTimeString("en-US",{hour:"numeric",minute:"2-digit"});
+        readme+=`  ${String(i+1).padStart(2,"0")}. ${filename}\n      Recorded: ${fullDate} at ${fullTime} | Duration: ${durStr}\n\n`;
+      }
+
+      readme+="\n\nHOW TO LISTEN\n";
+      readme+="=============\n\n";
+      readme+="These voice notes play directly in:\n";
+      readme+="  - Google Chrome (drag file into browser window)\n";
+      readme+="  - VLC Media Player (free download at videolan.org)\n";
+      readme+="  - Windows Media Player (Windows 10+)\n";
+      readme+="  - QuickTime Player (Mac)\n\n";
+      readme+="To convert to MP3, use a free online converter:\n";
+      readme+="  - cloudconvert.com\n";
+      readme+="  - convertio.co\n\n";
+      readme+="---\n";
+      readme+="Private & Confidential — For therapeutic use only.\n";
+      readme+="Recorded in The Buffer.\n";
+
+      folder.file("README.txt",readme);
+
+      const content=await zip.generateAsync({type:"blob"});
+      const url=URL.createObjectURL(content);
+      const a=document.createElement("a");
+      a.href=url;
+      a.download=`TheBuffer_VoiceNotes_${new Date().toISOString().slice(0,10)}.zip`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }catch(err){
+      console.error("ZIP export error:",err);
+      alert("Error creating ZIP. Please try again.");
+    }
+    setExporting(false);
+  };
+
+  /* ── Helpers ── */
+  const fmtT=s=>`${Math.floor(s/60)}:${String(s%60).padStart(2,"0")}`;
+  const fmtD=ts=>{const d=new Date(ts),diff=Date.now()-d;if(diff<60000)return"Just now";if(diff<3600000)return`${Math.floor(diff/60000)}m ago`;if(diff<86400000)return`${Math.floor(diff/3600000)}h ago`;return d.toLocaleDateString("en-US",{month:"short",day:"numeric"})};
+  const canSave=mode==="text"?text.trim().length>0:(recording||hasChunks);
+  const textCount=entries.filter(e=>e.type==="text").length;
+  const voiceCount=entries.filter(e=>e.type==="voice").length;
+
+  /* ── Styles ── */
+  const S={
+    root:{minHeight:"100vh",width:"100%",display:"flex",flexDirection:"column",alignItems:"center",background:"linear-gradient(180deg,#0B2418 0%,#0D2A1C 40%,#091E14 100%)",fontFamily:"'Cormorant Garamond',Georgia,serif"},
+    wrap:{position:"relative",zIndex:1,width:"100%",maxWidth:680,margin:"0 auto",padding:"48px 20px",display:"flex",flexDirection:"column",minHeight:"100vh"},
+    vessel:{borderRadius:20,padding:"28px 28px",background:"#1A2E23",border:"1px solid rgba(134,178,137,0.1)",boxShadow:"0 8px 40px rgba(0,0,0,0.3),inset 0 1px 0 rgba(134,178,137,0.05)",transition:"all 0.5s ease",transform:saving?"scale(0.96) translateY(12px)":"scale(1)",opacity:saving?0:1},
+    modeBtn:(a)=>({display:"flex",alignItems:"center",gap:8,padding:"8px 16px",borderRadius:10,fontSize:13,fontFamily:"'DM Sans',sans-serif",border:"none",cursor:"pointer",transition:"all 0.3s",background:a?"rgba(134,178,137,0.15)":"transparent",color:a?"#FDFBF7":"rgba(134,178,137,0.4)"}),
+    ta:{width:"100%",background:"transparent",border:"none",resize:"none",fontSize:17,lineHeight:1.7,color:"#FDFBF7",caretColor:"rgba(134,178,137,0.7)",minHeight:130,fontFamily:"'Cormorant Garamond',Georgia,serif"},
+    saveBtn:{padding:"10px 22px",borderRadius:14,fontSize:13,fontFamily:"'DM Sans',sans-serif",border:"1px solid rgba(134,178,137,0.2)",background:"rgba(134,178,137,0.18)",color:"#FDFBF7",cursor:"pointer",transition:"all 0.4s",opacity:canSave&&!saving?1:0.2},
+    card:(d)=>({borderRadius:18,padding:"20px 24px",background:"#1A2E23",border:"1px solid rgba(134,178,137,0.07)",transition:"all 0.5s",transform:d?"translateX(30px) scale(0.97)":"none",opacity:d?0:1}),
+    sub:{fontSize:11,fontFamily:"'DM Sans',sans-serif",color:"rgba(134,178,137,0.35)"},
+    body:{fontSize:15,lineHeight:1.65,color:"rgba(253,251,247,0.7)"},
+    exportBox:{marginTop:32,borderRadius:18,padding:"28px 24px",background:"rgba(26,46,35,0.5)",border:"1px solid rgba(134,178,137,0.08)"},
+    expBtn:(v)=>({display:"inline-flex",alignItems:"center",gap:8,padding:"12px 20px",borderRadius:14,fontSize:13,fontFamily:"'DM Sans',sans-serif",border:`1px solid rgba(134,178,137,${v==="primary"?0.2:0.1})`,background:`rgba(134,178,137,${v==="primary"?0.18:0.08})`,color:"#FDFBF7",cursor:"pointer",transition:"all 0.3s",width:"100%",justifyContent:"center"}),
+  };
+
+  return(
+    <div style={S.root}>
+      <div style={S.wrap}>
+        {/* Header */}
+        <header style={{textAlign:"center",marginBottom:52}}>
+          <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10,marginBottom:14}}>
+            <I.leaf size={18} stroke="rgba(134,178,137,0.55)" sw={1.4}/>
+            <span style={{fontSize:12,letterSpacing:"0.35em",textTransform:"uppercase",color:"rgba(134,178,137,0.55)",fontFamily:"'DM Sans',sans-serif",fontWeight:400}}>The Buffer</span>
+          </div>
+          <p style={{fontSize:20,color:"#FDFBF7",opacity:0.65,maxWidth:380,margin:"0 auto",lineHeight:1.5}}>
+            A private vessel for your&nbsp;thoughts.
+          </p>
+        </header>
+
+        {/* Vessel */}
+        <div style={S.vessel}>
+          <div style={{display:"flex",gap:4,marginBottom:24,padding:4,borderRadius:14,background:"rgba(11,36,24,0.6)",width:"fit-content"}}>
+            <button style={S.modeBtn(mode==="text")} onClick={()=>{setMode("text");if(recording)stopRec()}}><I.type size={13}/> Write</button>
+            <button style={S.modeBtn(mode==="voice")} onClick={()=>setMode("voice")}><I.volume size={13}/> Speak</button>
+          </div>
+
+          {mode==="text"&&(
+            <textarea ref={taRef} value={text} onChange={e=>setText(e.target.value)} placeholder="Let it out. No one is reading this but you…" rows={4} style={S.ta}/>
+          )}
+
+          {mode==="voice"&&(
+            <div style={{display:"flex",flexDirection:"column",gap:18}}>
+              <Waveform analyserRef={analyserRef} isRecording={recording}/>
+              {recording&&(
+                <div style={{display:"flex",alignItems:"center",justifyContent:"center",gap:10}}>
+                  <span className="pulse-rec" style={{width:9,height:9,borderRadius:"50%",background:"#c76e6e"}}/>
+                  <span style={{fontSize:13,fontFamily:"'DM Sans',monospace",color:"rgba(253,251,247,0.55)"}}>{fmtT(recTime)}</span>
+                </div>
+              )}
+              {micErr&&<p style={{fontSize:13,textAlign:"center",padding:"12px 16px",borderRadius:14,color:"#c76e6e",background:"rgba(199,110,110,0.1)"}}>{micErr}</p>}
+              <div style={{display:"flex",justifyContent:"center"}}>
+                {!recording?(
+                  <button onClick={startRec} style={{width:60,height:60,borderRadius:"50%",background:"rgba(134,178,137,0.12)",border:"2px solid rgba(134,178,137,0.25)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.4s"}}>
+                    <I.mic size={22} stroke="rgba(134,178,137,0.75)"/>
+                  </button>
+                ):(
+                  <button onClick={()=>stopRec()} className="pulse-rec" style={{width:60,height:60,borderRadius:"50%",background:"rgba(199,110,110,0.15)",border:"2px solid rgba(199,110,110,0.35)",cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",transition:"all 0.4s"}}>
+                    <I.square size={18} stroke="#c76e6e"/>
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+
+          <div style={{marginTop:24,display:"flex",justifyContent:"flex-end"}}>
+            <button onClick={save} disabled={!canSave||saving} style={S.saveBtn}>
+              {saving?<span style={{display:"flex",alignItems:"center",gap:8}}><I.wind size={13} stroke="#FDFBF7"/> Releasing…</span>:"Release into the vault"}
+            </button>
+          </div>
+        </div>
+
+        {saving&&(
+          <div style={{display:"flex",justifyContent:"center",marginTop:-8,marginBottom:8,gap:5}}>
+            {[0,1,2].map(i=><span key={i} className="breathe" style={{width:5,height:5,borderRadius:"50%",background:"rgba(134,178,137,0.45)",animationDelay:`${i*200}ms`}}/>)}
+          </div>
+        )}
+
+        {/* Vault */}
+        {entries.length>0&&(
+          <div style={{marginTop:52}}>
+            <button onClick={()=>setShowVault(!showVault)} style={{width:"100%",display:"flex",alignItems:"center",justifyContent:"space-between",padding:"0 8px",marginBottom:20,background:"none",border:"none",cursor:"pointer"}}>
+              <div style={{display:"flex",alignItems:"center",gap:10}}>
+                <div style={{width:32,height:1,background:"rgba(134,178,137,0.2)"}}/>
+                <span style={{fontSize:11,letterSpacing:"0.25em",textTransform:"uppercase",color:"rgba(134,178,137,0.4)",fontFamily:"'DM Sans',sans-serif"}}>Your Vault</span>
+                <span style={{fontSize:11,padding:"2px 8px",borderRadius:20,color:"rgba(134,178,137,0.35)",background:"rgba(134,178,137,0.08)",fontFamily:"'DM Sans',sans-serif"}}>{entries.length}</span>
+              </div>
+              <span style={{color:"rgba(134,178,137,0.3)",transition:"transform 0.5s",transform:showVault?"rotate(180deg)":"none",display:"flex"}}>
+                <I.chevDown size={15}/>
+              </span>
+            </button>
+
+            <div style={{overflow:"hidden",maxHeight:showVault?9999:0,opacity:showVault?1:0,transition:"all 0.7s ease"}}>
+              <div style={{display:"flex",flexDirection:"column",gap:12}}>
+                {entries.map(e=>(
+                  <div key={e.id} className="vault-card" style={S.card(deleting===e.id)}>
+                    <div style={{display:"flex",alignItems:"flex-start",justifyContent:"space-between",marginBottom:10}}>
+                      <div style={{display:"flex",alignItems:"center",gap:8}}>
+                        {e.type==="text"?<I.type size={11} stroke="rgba(134,178,137,0.3)"/>:<I.mic size={11} stroke="rgba(134,178,137,0.3)"/>}
+                        <span style={S.sub} title={new Date(e.timestamp).toLocaleString()}>{fmtD(e.timestamp)}</span>
+                      </div>
+                      <button className="delete-btn" onClick={()=>del(e.id,e.type)} style={{background:"none",border:"none",cursor:"pointer",padding:4,color:"rgba(199,110,110,0.45)"}} title="Delete">
+                        <I.trash size={12}/>
+                      </button>
+                    </div>
+                    {e.type==="text"
+                      ?<p style={S.body}>{e.content.length>300?e.content.slice(0,300)+"…":e.content}</p>
+                      :<AudioPlayer entryId={e.id}/>}
+                  </div>
+                ))}
+              </div>
+
+              {/* ══════ EXPORT SECTION ══════ */}
+              <div style={S.exportBox}>
+                <p style={{fontSize:14,marginBottom:4,color:"rgba(253,251,247,0.6)",fontFamily:"'DM Sans',sans-serif",fontWeight:500}}>
+                  Prepare for your therapist
+                </p>
+                <p style={{fontSize:11,marginBottom:24,color:"rgba(134,178,137,0.35)",fontFamily:"'DM Sans',sans-serif",lineHeight:1.5}}>
+                  Text entries export as a formatted PDF. Voice notes export as a folder of audio files.
+                </p>
+
+                <div className="export-grid" style={{display:"flex",gap:12}}>
+                  <div style={{flex:1}}>
+                    <button onClick={exportPDF} disabled={textCount===0} style={{...S.expBtn("primary"),opacity:textCount===0?0.3:1}}>
+                      <I.fileText size={15}/> Download PDF
+                    </button>
+                    <p style={{fontSize:10,marginTop:8,color:"rgba(134,178,137,0.28)",fontFamily:"'DM Sans',sans-serif",textAlign:"center"}}>
+                      {textCount} text entr{textCount===1?"y":"ies"} with timestamps
+                    </p>
+                  </div>
+
+                  <div style={{flex:1}}>
+                    <button onClick={exportZIP} disabled={voiceCount===0||exporting} style={{...S.expBtn("secondary"),opacity:voiceCount===0?0.3:1}}>
+                      {exporting
+                        ?<><span style={{display:"inline-flex",animation:"pulseRec 1s ease infinite"}}>⏳</span> Packing…</>
+                        :<><I.archive size={15}/> Download Voice Notes</>}
+                    </button>
+                    <p style={{fontSize:10,marginTop:8,color:"rgba(134,178,137,0.28)",fontFamily:"'DM Sans',sans-serif",textAlign:"center"}}>
+                      {voiceCount} voice note{voiceCount===1?"":"s"} as a ZIP folder
+                    </p>
+                  </div>
+                </div>
+
+                <div style={{marginTop:20,padding:"14px 18px",borderRadius:12,background:"rgba(11,36,24,0.4)",border:"1px solid rgba(134,178,137,0.05)"}}>
+                  <p style={{fontSize:10,color:"rgba(134,178,137,0.3)",fontFamily:"'DM Sans',sans-serif",lineHeight:1.7,textAlign:"center"}}>
+                    📄 The PDF contains all written thoughts with full date and time stamps.<br/>
+                    🎙 The ZIP contains numbered audio files, a README with timestamps, and playback instructions for your therapist.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <footer style={{marginTop:"auto",paddingTop:64,paddingBottom:24,textAlign:"center"}}>
+          <p style={{fontSize:11,color:"rgba(134,178,137,0.18)",fontFamily:"'DM Sans',sans-serif"}}>
+            Everything stays here. Nothing leaves your browser.
+          </p>
+        </footer>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
